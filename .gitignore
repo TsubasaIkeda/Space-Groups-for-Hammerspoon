@@ -1,0 +1,29 @@
+# ローカル専用（マシン固有の設定・上書き）
+init-local.lua
+local/
+.luacheckrc.local
+
+# Spoons（公式サイト等から取得した第三者プラグイン）
+Spoons/*
+!Spoons/.gitkeep
+*.spoon.zip
+
+# Lua ビルド成果物
+luac.out
+
+# ログ
+*.log
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Icon?
+
+# エディタ / IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+*~
