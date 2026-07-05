@@ -732,15 +732,27 @@ local function buildMenu()
   end
 
   -- アクティブウィンドウの移動
+  -- ディスプレイをまたぐ移動には未対応のため、移動先は現在フォーカス中の
+  -- デスクトップと同一ディスプレイのものだけに限定する
   table.insert(items, { title = "-" })
   local moveSub = {}
-  for _, s in ipairs(getWorkspaceStates()) do
-    local num = s.num
-    table.insert(moveSub, {
-      title = num .. ": " .. effectiveSpaceName(num) .. "  [" .. s.screen .. "]",
-      disabled = s.focused,  -- 現在地への移動は無意味なので無効化
-      fn = function() moveActiveWindowToSpace(num) end,
-    })
+  local states = getWorkspaceStates()
+  local focusedScreen = nil
+  for _, s in ipairs(states) do
+    if s.focused then focusedScreen = s.screen end
+  end
+  for _, s in ipairs(states) do
+    if s.screen == focusedScreen then
+      local num = s.num
+      table.insert(moveSub, {
+        title = num .. ": " .. effectiveSpaceName(num) .. "  [" .. s.screen .. "]",
+        disabled = s.focused,  -- 現在地への移動は無意味なので無効化
+        fn = function() moveActiveWindowToSpace(num) end,
+      })
+    end
+  end
+  if #moveSub == 0 then
+    table.insert(moveSub, { title = "（移動先なし）", disabled = true })
   end
   table.insert(items, { title = "アクティブウィンドウを移動", menu = moveSub })
 
