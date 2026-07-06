@@ -3,6 +3,10 @@ init-local.lua
 local/
 .luacheckrc.local
 
+# 実行時設定（グループ・デスクトップ名/ディスプレイ名・プリセット）
+# マシン固有のため追跡しない。バージョン管理したい場合はこの行を削除する。
+space_groups.json
+
 # Spoons（公式サイト等から取得した第三者プラグイン）
 Spoons/*
 !Spoons/.gitkeep

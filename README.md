@@ -4,9 +4,9 @@ macOS の Mission Control デスクトップ（Spaces）をグループ化し、
 
 ## 機能
 
-- **デスクトップの名前づけ** — 実行時に編集し、`hs.settings` に永続化
-- **グループ管理** — 作成・削除・構成変更をメニューから行い、永続化
-- **グループジャンプ / グループ内巡回** — 複数デスクトップを順次切り替え（マルチディスプレイ対応）
+- **デスクトップ / ディスプレイの名前づけ** — 実行時に編集、JSON ファイルに永続化・直接編集も可
+- **グループ管理** — 作成・削除・構成変更をメニューまたは JSON 直接編集で行う
+- **グループジャンプ / グループ間巡回** — グループ（ワークスペース）単位で複数ディスプレイを一括切り替え
 - **プリセット** — 現在の表示状態（各ディスプレイで表示中のデスクトップ）をスナップショット保存・呼び出し
 - **アクティブウィンドウの移動** — メニューから移動先を選択
 - **メニューバー表示** — 現在地とグループ内の位置をストリップ表示、クリックで移動
@@ -39,8 +39,8 @@ macOS の Mission Control デスクトップ（Spaces）をグループ化し、
 | ショートカット | 動作 |
 |---|---|
 | `Ctrl+Alt+1` 〜 `Ctrl+Alt+9` | 対応するグループへジャンプ（グループ数に応じて動的に割り当て） |
-| `Ctrl+Alt+→` | 現在のグループ内で次のデスクトップへ |
-| `Ctrl+Alt+←` | 現在のグループ内で前のデスクトップへ |
+| `Ctrl+Alt+→` | 次のグループ（ワークスペース）へ巡回 |
+| `Ctrl+Alt+←` | 前のグループ（ワークスペース）へ巡回 |
 | `Ctrl+Alt+R` | 設定をリロード |
 | `Ctrl+Alt+C` | Hammerspoon コンソールを開く |
 
@@ -55,7 +55,7 @@ macOS の Mission Control デスクトップ（Spaces）をグループ化し、
 - **プリセット管理** — 現在の表示状態の保存・呼び出し・削除
 - **グループ管理** — グループの作成・編集・削除、設定からの初期化
 - **デスクトップ名を編集** — 表示名の変更、状態一覧
-- **ユーティリティ** — `init.lua` を開く、リロード、コンソールなど
+- **ユーティリティ** — JSON設定を開く／JSONから再読み込み、`init.lua` を開く、リロード、コンソールなど
 
 メニューバー表示モードは `init.lua` 冒頭の `TITLE_MODE` で変更できます。
 
@@ -66,11 +66,11 @@ macOS の Mission Control デスクトップ（Spaces）をグループ化し、
 
 ### 実行時編集（推奨）
 
-メニューバー → **グループ管理** から作成・編集します。変更は `hs.settings` に自動保存されます。
+メニューバー → **グループ管理** から作成・編集します。変更は `space_groups.json` に自動保存されます。
 
 ### 初期定義（`DEFAULT_GROUPS`）
 
-`init.lua` 内の `DEFAULT_GROUPS` は **初回起動時のみ** 取り込まれます。以降の編集はメニューから行い、**グループ定義の正は `hs.settings` 側** です。
+`init.lua` 内の `DEFAULT_GROUPS` は **初回起動時のみ** 取り込まれます。以降の編集はメニューまたは JSON 直接編集で行い、**設定の正は `space_groups.json`** です。
 
 「グループ管理 → 設定から初期化」で `DEFAULT_GROUPS` の内容に戻せます。
 
@@ -80,13 +80,12 @@ local DEFAULT_GROUPS = {
     name = "Sound",
     icon = "♪",
     spaces = { {1, "REAPER"}, {2, "Logic"} },
-    jump = {4, 1},  -- マルチディスプレイ時: 各ディスプレイ1つずつ、最後の番号にフォーカス
   },
 }
 ```
 
 - `spaces` — `{デスクトップ番号, "表示名（初期値）"}` の配列
-- `jump` — ジャンプ時に順次切り替える番号（省略時は先頭番号のみ）
+- グループへのジャンプ時は、所属デスクトップ全部へ順次切り替わります（マルチディスプレイなら各ディスプレイが一斉に揃う）
 
 ## プリセット
 
@@ -114,70 +113,61 @@ local DEFAULT_GROUPS = {
 | 変数 | 説明 | デフォルト |
 |---|---|---|
 | `JUMP_MODS` | グループジャンプの修飾キー | `{ "ctrl", "alt" }` |
-| `CYCLE_MODS` | グループ内巡回の修飾キー | `{ "ctrl", "alt" }` |
-| `CYCLE_NEXT_KEY` / `CYCLE_PREV_KEY` | 巡回方向のキー | `"left"` / `"right"` |
+| `CYCLE_MODS` | グループ間巡回の修飾キー | `{ "ctrl", "alt" }` |
+| `CYCLE_NEXT_KEY` / `CYCLE_PREV_KEY` | 巡回方向のキー（次 / 前） | `"right"` / `"left"` |
 | `TITLE_MODE` | メニューバー表示モード | `"full"` |
 | `EDITOR_APP` | 設定ファイルを開くアプリ名（`nil` で関連付けアプリ） | `nil` |
 | `DRAG_SETTLE` | ウィンドウ移動時の待ち時間（秒） | `0.20` |
 | `SWITCH_FALLBACK` | 順次切り替えの保険タイムアウト（秒） | `0.1` |
 
-## hs.settings
+## 設定ファイル（`space_groups.json`）
 
-メニューから行った編集（グループ・デスクトップ名・プリセット）は **`init.lua` ではなく `hs.settings`** に保存されます。リポジトリを clone しただけではこれらのデータは引き継がれません。
-
-### 保存場所
-
-macOS の User Defaults（Preferences）に書き込まれます。
+メニューから行った編集（グループ・デスクトップ名・ディスプレイ名・プリセット）は、
+**JSON ファイルに保存され、エディタで直接編集できます**。
 
 ```
-~/Library/Preferences/org.hammerspoon.Hammerspoon.plist
+~/.hammerspoon/space_groups.json
 ```
 
-`hs.settings.bundleID` は `org.hammerspoon.Hammerspoon` です。
+### 直接編集の手順
 
-### 使用しているキー
+1. メニューバー → **ユーティリティ → JSON設定を開く (space_groups.json)**
+2. エディタで編集して保存
+3. メニューバー → **ユーティリティ → JSONから再読み込み**（フル リロード `Ctrl+Alt+R` でも可）
+
+> 書式（JSON）が壊れている場合は読み込みをスキップし、**ファイルは上書きされません**（編集内容は失われません）。修正後にもう一度「JSONから再読み込み」してください。
+
+### 構造
+
+```json
+{
+  "groups": [
+    { "name": "WS1", "icon": "♪",
+      "spaces": [ { "num": 1, "label": "REAPER" }, { "num": 4 } ] }
+  ],
+  "nameOverrides": { "1": "REAPER", "2": "Logic" },
+  "displayNames": { "AMZG49C7U": "右モニタ" },
+  "presets": [ { "name": "作業", "targets": [1, 4] } ]
+}
+```
 
 | キー | 内容 |
 |---|---|
-| `SpaceGroups.groups` | グループ定義（名前・アイコン・所属デスクトップ・ジャンプ先） |
-| `SpaceGroups.nameOverrides` | デスクトップ表示名の上書き |
-| `SpaceGroups.presets` | プリセット（表示状態のスナップショット） |
+| `groups` | グループ定義（名前・アイコン・所属デスクトップ `{num,label}`） |
+| `nameOverrides` | デスクトップ表示名の上書き（`"番号": "名前"`） |
+| `displayNames` | ディスプレイ名の別名（`"実際の名前": "表示名"`。未登録は実名） |
+| `presets` | プリセット（表示状態のスナップショット） |
 
-初回起動時、`SpaceGroups.groups` が未設定の場合のみ `init.lua` の `DEFAULT_GROUPS` が取り込まれます。
+### 移行・初期化
 
-### 確認・バックアップ
+- 旧バージョンで `hs.settings` に保存していたデータは、**初回起動時に自動で JSON へ移行**されます。
+- JSON が存在しない初回のみ `init.lua` の `DEFAULT_GROUPS` が取り込まれます。
+- グループだけ初期化したい場合はメニュー → **グループ管理 → 設定から初期化**。
 
-```bash
-# キー一覧
-defaults read org.hammerspoon.Hammerspoon | grep SpaceGroups
+### バージョン管理
 
-# バックアップ
-cp ~/Library/Preferences/org.hammerspoon.Hammerspoon.plist ~/Desktop/hammerspoon-settings-backup.plist
-```
-
-Hammerspoon コンソールからも確認できます。
-
-```lua
-hs.inspect(hs.settings.get("SpaceGroups.groups"))
-hs.inspect(hs.settings.getKeys())
-```
-
-### リセット
-
-| 目的 | 方法 |
-|---|---|
-| グループだけ戻す | メニュー → **グループ管理 → 設定から初期化** |
-| 特定キーを削除 | コンソール: `hs.settings.clear("SpaceGroups.groups")` の後リロード |
-| Space Groups 関連をすべて削除 | 下記3キーを `hs.settings.clear` する |
-
-```lua
-hs.settings.clear("SpaceGroups.groups")
-hs.settings.clear("SpaceGroups.nameOverrides")
-hs.settings.clear("SpaceGroups.presets")
-hs.reload()
-```
-
-`.gitignore` の対象外であり、**このリポジトリには含まれません**。別マシンへ移す場合は plist のバックアップか、メニューから再設定してください。
+`space_groups.json` は **マシン固有データのため `.gitignore` 済み**（リポジトリには含まれません）。
+バージョン管理したい場合は `.gitignore` の該当行を削除してください。別マシンへ移すときはこのファイルをコピーするだけで済みます。
 
 ## 技術メモ
 

@@ -3,7 +3,7 @@
 -- 統合版：
 --   ・デスクトップの名前づけ（実行時編集・永続化）
 --   ・グルーピングの実行時編集（作成・削除・構成変更・永続化）
---   ・グループジャンプ／グループ内巡回
+--   ・グループジャンプ／グループ（ワークスペース）間の巡回
 --   ・マルチディスプレイ対応（複数デスクトップを順次切り替え）
 --   ・イベント駆動による高速順次切り替え（watcher＋保険タイマー）
 --   ・プリセット機能（表示状態のスナップショット保存・呼び出し）
@@ -12,8 +12,10 @@
 --   ・メニューバー表示（現在地＋ストリップ、クリックで移動）
 --   ・ユーティリティメニュー
 --
--- グループ定義の正は hs.settings（実行時編集分）。
--- 初回起動時のみ下記 DEFAULT_GROUPS から取り込む。
+-- 設定（グループ・デスクトップ名/ディスプレイ名の上書き・プリセット）の正は
+-- JSON ファイル ~/.hammerspoon/space_groups.json。メニューからの編集はここへ保存され、
+-- エディタで直接編集して「JSONから再読み込み」もできる。
+-- 初回起動時のみ下記 DEFAULT_GROUPS（と旧 hs.settings）から取り込む。
 -- 「グループ管理 → 設定から初期化」で DEFAULT_GROUPS に戻せる。
 --
 -- 切り替えの実行系は Ctrl+数字 のキーイベント合成のみを使用。
@@ -37,16 +39,19 @@
 -- ---------------------------------------------------------
 
 -- グループの初期定義（初回起動時のみ取り込まれる。
--- 以後の編集はメニューから行い hs.settings に保存される）
+-- 以後の編集はメニューまたは space_groups.json への直接編集で行う）
 -- spaces: { {デスクトップ番号, "表示名（初期値）"}, ... }
--- jump:   グループジャンプ時に切り替える番号（ディスプレイごとに1つ）
+-- グループへのジャンプ時は所属デスクトップ全部へ順次切り替わる。
 local DEFAULT_GROUPS = {}
 
 -- キーバインド
 local JUMP_MODS      = { "ctrl", "alt" } -- Ctrl+Alt+1〜 でグループジャンプ
 local CYCLE_MODS     = { "ctrl", "alt" }
-local CYCLE_NEXT_KEY = "left"               -- Ctrl+Alt+N グループ内で次へ
-local CYCLE_PREV_KEY = "right"               -- Ctrl+Alt+P グループ内で前へ
+-- 巡回キー（グループ＝ワークスペース間を移動）。
+-- Ctrl+Alt+矢印 はウィンドウ整列アプリ（Rectangle/Magnet 等）に奪われやすいので、
+-- 効かない場合はそれらのアプリ側で該当割り当てを解除すること。
+local CYCLE_NEXT_KEY = "right"               -- Ctrl+Alt+→ 次のグループへ
+local CYCLE_PREV_KEY = "left"                -- Ctrl+Alt+← 前のグループへ
 
 -- 順次切り替えの保険タイムアウト（秒）
 local SWITCH_FALLBACK = 0.1
@@ -76,10 +81,21 @@ local rebindGroupHotkeys
 -- グループの読み込み・保存
 -- 内部形式（settings保存形式と同一）:
 --   { { name="Sound", icon="♪",
---       spaces={ {num=1,label="REAPER"}, ... },
---       jump={4,1} }, ... }
+--       spaces={ {num=1,label="REAPER"}, ... } }, ... }
 -- ---------------------------------------------------------
-local GROUPS_KEY = "SpaceGroups.groups"
+-- 旧 hs.settings キー（JSON 未生成の既存ユーザーからの移行用に読み込みのみ使用）
+local GROUPS_KEY   = "SpaceGroups.groups"
+local NAMES_KEY    = "SpaceGroups.nameOverrides"
+local PRESETS_KEY  = "SpaceGroups.presets"
+
+-- 設定（グループ・デスクトップ名の上書き・プリセット）は1つの JSON ファイルへ
+-- まとめて保存する。エディタで直接編集し、メニューから再読み込みできる。
+local DATA_PATH = os.getenv("HOME") .. "/.hammerspoon/space_groups.json"
+
+-- 保存対象の実体。JSON 全体をまとめて書き出すため前方宣言しておく。
+-- displayNames: 実際のディスプレイ名（screen:name()）→ 表示用の別名。
+--               例 { "AMZG49C7U" = "右モニタ" }。未登録なら実名をそのまま使う。
+local GROUPS, nameOverrides, presets, displayNames
 
 -- DEFAULT_GROUPS（配列ペア形式）→ 内部形式へ変換
 local function convertDefaultGroups()
@@ -91,19 +107,45 @@ local function convertDefaultGroups()
     end
     table.insert(out, {
       name = g.name, icon = g.icon, spaces = sps,
-      jump = g.jump and { table.unpack(g.jump) } or nil,
     })
   end
   return out
 end
 
-local GROUPS = hs.settings.get(GROUPS_KEY) or convertDefaultGroups()
-
-local function saveGroups()
-  hs.settings.set(GROUPS_KEY, GROUPS)
+-- 全設定を JSON ファイルへ書き出す（人が読める整形付き・上書き）
+local function saveData()
+  hs.json.write({
+    groups        = GROUPS or {},
+    nameOverrides = nameOverrides or {},
+    displayNames  = displayNames or {},
+    presets       = presets or {},
+  }, DATA_PATH, true, true)
 end
--- 初回はここで永続化される
-saveGroups()
+
+-- 読み込み: JSON 優先 → 旧 hs.settings（移行）→ デフォルト
+local hadDataFile = hs.fs.attributes(DATA_PATH) ~= nil
+local persisted = hs.json.read(DATA_PATH)
+if hadDataFile and not persisted then
+  -- 手編集で書式が壊れているケース。ファイルは上書きせず（＝編集内容を守り）、
+  -- 既存設定/デフォルトで起動する。修正後に「JSONから再読み込み」で反映できる。
+  print("space_groups.json の読み込みに失敗（JSON書式エラー）。ファイルは保持し、既存設定で起動します。")
+end
+persisted = persisted or {}
+GROUPS        = persisted.groups        or hs.settings.get(GROUPS_KEY)  or convertDefaultGroups()
+nameOverrides = persisted.nameOverrides or hs.settings.get(NAMES_KEY)   or {}
+presets       = persisted.presets       or hs.settings.get(PRESETS_KEY) or {}
+displayNames  = persisted.displayNames  or {}
+
+-- ファイル未生成（初回起動・旧 hs.settings からの移行）のときだけ生成する。
+-- 既存ファイルを起動時に自動上書きはしない（書式エラー時に編集内容を失わないため）。
+if not hadDataFile then
+  saveData()
+end
+
+-- グループのみ変更した場合も全体を書き出す（保存先は単一 JSON）
+local function saveGroups()
+  saveData()
+end
 
 -- 番号→初期表示名、番号→(グループindex, グループ内index) の逆引き表。
 -- グループ編集のたびに再構築する
@@ -131,11 +173,54 @@ end
 -- Space切り替えの基本操作
 -- ---------------------------------------------------------
 
+-- hs.screen.allScreens() の並び順は macOS が仮想デスクトップに番号を振る順序
+-- （Ctrl+数字 の割り当て順）とは無関係。番号順は SkyLight の管理データ
+-- spaces.data_managedDisplaySpaces() が返すディスプレイ配列の順序と一致するため、
+-- 画面をその順序に並べ替えて返す。デスクトップ通し番号はこの順序で付番されるので、
+-- 画面を走査して番号を割り当てる処理は必ず本関数を使い、全箇所で一貫した順序
+-- （＝ macOS の実際のデスクトップ番号順）を保証する。
+local function orderedScreens()
+  local screens = hs.screen.allScreens()
+
+  local managed = spaces.data_managedDisplaySpaces()
+  if not managed then return screens end  -- 取得失敗時は元の順序で保険
+
+  -- UUID → hs.screen オブジェクトの対応表
+  local byUUID = {}
+  for _, s in ipairs(screens) do byUUID[s:getUUID()] = s end
+
+  local ordered, seen = {}, {}
+  local function push(s)
+    if s and not seen[s:getUUID()] then
+      seen[s:getUUID()] = true
+      ordered[#ordered + 1] = s
+    end
+  end
+
+  -- 管理データの並び順（＝ macOS のデスクトップ番号順）で画面を積む。
+  -- プライマリ画面はデータ上 "Main"/"Primary" で表現されることがあるため補完する。
+  for _, disp in ipairs(managed) do
+    local ident = disp["Display Identifier"]
+    if ident == "Main" or ident == "Primary" then
+      -- spaces データの "Main" はメニューバーのあるプライマリ画面（固定）を指す。
+      -- mainScreen()（フォーカス中の画面・可変）ではないので primaryScreen() を使う。
+      push(hs.screen.primaryScreen())
+    else
+      push(byUUID[ident])
+    end
+  end
+
+  -- 管理データに現れなかった接続中の画面は末尾に補完（保険）
+  for _, s in ipairs(screens) do push(s) end
+
+  return ordered
+end
+
 -- 現在フォーカスのあるデスクトップ番号（全ディスプレイ通し連番）
 local function currentSpaceNumber()
   local focused = spaces.focusedSpace()
   local n = 0
-  for _, screen in ipairs(hs.screen.allScreens()) do
+  for _, screen in ipairs(orderedScreens()) do
     local ids = spaces.spacesForScreen(screen)
     if ids then
       for _, id in ipairs(ids) do
@@ -149,11 +234,23 @@ local function currentSpaceNumber()
   return nil
 end
 
--- デスクトップ番号 → Ctrl+数字 のキーイベントを発行して切り替え
+-- 送出直前に“離した状態”へ戻したい修飾キー（Alt/Cmd/Shift の左右）。
+-- ホットキー(Ctrl+Alt+…)発動直後は物理修飾キーが押されたままで、そのまま Ctrl+数字 を
+-- 送ると Alt 等が混入して「デスクトップ切替」が発火しない。Ctrl は自分で付与する
+-- Ctrl+数字 と同じなので解除不要。
+local CLEAR_MODS = { "alt", "rightalt", "cmd", "rightcmd", "shift", "rightshift" }
+
+-- デスクトップ番号 → Ctrl+数字 のキーイベントを発行して切り替え。
+-- 送出直前に Alt/Cmd/Shift のキーアップを合成注入して混入を消すため、発動元キーを
+-- 押している最中でも（離す前でも）即座に切り替わる。
 local function gotoSpaceNumber(n)
   if n < 1 or n > 9 then
     hs.alert.show("Space " .. n .. " はショートカット範囲外 (1-9)")
     return
+  end
+  for _, mod in ipairs(CLEAR_MODS) do
+    local code = hs.keycodes.map[mod]
+    if code then hs.eventtap.event.newKeyEvent(code, false):post() end
   end
   hs.eventtap.keyStroke({ "ctrl" }, tostring(n), 0)
 end
@@ -188,53 +285,94 @@ local function gotoSpacesSequence(numbers)
   end
 
   seqWatcher = spaces.watcher.new(function()
-    hs.timer.doAfter(0.05, fireNext)
+    hs.timer.doAfter(0.02, fireNext)
   end)
   seqWatcher:start()
 
+  -- gotoSpaceNumber が送出直前に修飾キーアップを注入するため、押しっぱなしでも
+  -- 混入しない。よって解放待ちは不要で、押した瞬間に即座に開始できる。
   fireNext()
 end
+
+-- 直近に移動したグループ（巡回のフォールバック起点に使う）
+local lastGroupIndex = nil
 
 -- グループジャンプ
 local function jumpToGroup(gi)
   local g = GROUPS[gi]
   if not g then return end
-  local targets = g.jump
-  if not targets or #targets == 0 then
-    targets = { g.spaces[1] and g.spaces[1].num }
-  end
-  if not targets[1] then
-    hs.alert.show(g.name .. ": ジャンプ先が未設定")
+  -- ジャンプ先は所属デスクトップ全部。所属番号すべてに順次切り替えるので、
+  -- マルチディスプレイなら各ディスプレイが一斉にこのグループへ揃う。
+  local targets = {}
+  for _, sp in ipairs(g.spaces) do table.insert(targets, sp.num) end
+  if #targets == 0 then
+    hs.alert.show(g.name .. ": 所属デスクトップが未設定")
     return
   end
+  lastGroupIndex = gi
   gotoSpacesSequence(targets)
   hs.alert.show(g.name, 0.4)
 end
 
--- グループ内巡回
-local function cycleInGroup(direction) -- direction: 1 or -1
+-- グループ（ワークスペース）間の巡回。
+-- グループは複数ディスプレイにまたがる1ワークスペースなので、巡回は「隣のグループへ
+-- ジャンプ」＝実績のあるジャンプ機構の再利用とする。現在グループはフォーカス中
+-- デスクトップから判定し、特定できない場合は直近に巡回/ジャンプしたグループを起点にする。
+local function cycleGroup(direction) -- direction: 1 or -1
+  if #GROUPS == 0 then
+    hs.alert.show("グループがありません")
+    return
+  end
+  -- 現在グループの特定：フォーカス中デスクトップ → 所属グループ。
+  local curGi
   local cur = currentSpaceNumber()
-  if not cur then
-    hs.alert.show("現在のSpaceを特定できません")
-    return
+  if cur and SPACE_GROUP[cur] then
+    curGi = SPACE_GROUP[cur].gi
+  elseif lastGroupIndex then
+    curGi = lastGroupIndex
+  else
+    -- どのグループにも居らず履歴も無い場合は、direction 方向の端から開始する。
+    curGi = (direction > 0) and #GROUPS or 1
   end
-  local pos = SPACE_GROUP[cur]
-  if not pos then
-    hs.alert.show("このSpaceはどのグループにも未登録")
-    return
-  end
-  local g = GROUPS[pos.gi]
-  local nextIdx = ((pos.si - 1 + direction) % #g.spaces) + 1
-  gotoSpaceNumber(g.spaces[nextIdx].num)
+  local nextGi = ((curGi - 1 + direction) % #GROUPS) + 1
+  lastGroupIndex = nextGi
+  jumpToGroup(nextGi)
 end
 
--- 設定ファイルを開く
+-- 設定ファイル（init.lua）を開く
 local function openConfig()
   if EDITOR_APP then
     hs.execute(string.format('open -a "%s" "%s"', EDITOR_APP, CONFIG_PATH))
   else
     hs.execute(string.format('open "%s"', CONFIG_PATH))
   end
+end
+
+-- JSON 設定ファイル（グループ・名前・プリセット）をエディタで開く
+local function openDataFile()
+  saveData()  -- 最新状態を書き出してから開く
+  if EDITOR_APP then
+    hs.execute(string.format('open -a "%s" "%s"', EDITOR_APP, DATA_PATH))
+  else
+    hs.execute(string.format('open "%s"', DATA_PATH))
+  end
+end
+
+-- JSON 設定ファイルを読み直して即時反映（手編集後に使う）
+local function reloadDataFile()
+  local d = hs.json.read(DATA_PATH)
+  if not d then
+    hs.alert.show("JSON を読み込めません（書式エラーの可能性）")
+    return
+  end
+  GROUPS        = d.groups or {}
+  nameOverrides = d.nameOverrides or {}
+  displayNames  = d.displayNames or {}
+  presets       = d.presets or {}
+  rebuildIndexes()
+  rebindGroupHotkeys()
+  updateMenubarTitle()
+  hs.alert.show("JSON 設定を再読み込みしました", 0.8)
 end
 
 -- ---------------------------------------------------------
@@ -311,11 +449,9 @@ end
 -- ワークスペース状態の取得と名前編集
 -- 名前解決の優先順位: 上書き → グループのラベル → "Desktop N"
 -- ---------------------------------------------------------
-local NAMES_KEY = "SpaceGroups.nameOverrides"
-local nameOverrides = hs.settings.get(NAMES_KEY) or {}
-
+-- nameOverrides は冒頭の永続化ブロックで読み込み済み。保存は JSON 全体をまとめて書く。
 local function saveNameOverrides()
-  hs.settings.set(NAMES_KEY, nameOverrides)
+  saveData()
 end
 
 local function effectiveSpaceName(num)
@@ -325,13 +461,22 @@ local function effectiveSpaceName(num)
   return "Desktop " .. num
 end
 
+-- 実ディスプレイ名（screen:name()）→ 表示用の別名（displayNames 上書き）。
+-- 未登録なら実名をそのまま返す。
+local function effectiveScreenName(realName)
+  if not realName then return "?" end
+  local ov = displayNames[realName]
+  if ov and ov ~= "" then return ov end
+  return realName
+end
+
 -- 全デスクトップの状態を取得（走査順は currentSpaceNumber と同一）
 local function getWorkspaceStates()
   local result = {}
   local active = spaces.activeSpaces() or {}
   local focused = spaces.focusedSpace()
   local n = 0
-  for _, screen in ipairs(hs.screen.allScreens()) do
+  for _, screen in ipairs(orderedScreens()) do
     local ids = spaces.spacesForScreen(screen)
     if ids then
       local activeId = active[screen:getUUID()]
@@ -341,7 +486,7 @@ local function getWorkspaceStates()
           table.insert(result, {
             num     = n,
             id      = id,
-            screen  = screen:name() or "?",
+            screen  = effectiveScreenName(screen:name()),
             visible = (id == activeId),
             focused = (id == focused),
           })
@@ -395,7 +540,7 @@ local moveRunning = false
 -- （走査順は currentSpaceNumber / getWorkspaceStates と同一）
 local function screenOfSpaceNumber(targetNum)
   local n = 0
-  for _, screen in ipairs(hs.screen.allScreens()) do
+  for _, screen in ipairs(orderedScreens()) do
     local ids = spaces.spacesForScreen(screen)
     if ids then
       for _, id in ipairs(ids) do
@@ -501,21 +646,7 @@ local function createGroup()
     return
   end
 
-  local jumpText = promptText("グループを作成",
-    "ジャンプ時に切り替える番号（ディスプレイごとに1つ、カンマ区切り。\n" ..
-    "例: 4,1  ※最後の番号にフォーカスが残る。空欄なら先頭番号のみ）", "")
-  if jumpText == nil then return end
-  local jump = nil
-  if jumpText ~= "" then
-    local j, jerr = parseNumberList(jumpText)
-    if not j then
-      hs.alert.show(jerr)
-      return
-    end
-    jump = j
-  end
-
-  local g = { name = name, icon = nil, spaces = {}, jump = jump }
+  local g = { name = name, icon = nil, spaces = {} }
   g.spaces = numbersToSpaces(g, numbers)
   table.insert(GROUPS, g)
   afterGroupsChanged()
@@ -556,29 +687,6 @@ local function editGroupSpaces(gi)
   hs.alert.show(g.name .. ": 構成を更新", 0.6)
 end
 
-local function editGroupJump(gi)
-  local g = GROUPS[gi]
-  local currentJump = g.jump and table.concat(g.jump, ",") or ""
-  local text = promptText("ジャンプ先を編集",
-    g.name .. " のジャンプ時に切り替える番号\n" ..
-    "（ディスプレイごとに1つ、カンマ区切り。最後の番号にフォーカスが残る。\n" ..
-    "空欄で保存すると先頭番号のみになります）",
-    currentJump)
-  if text == nil then return end
-  if text == "" then
-    g.jump = nil
-  else
-    local j, err = parseNumberList(text)
-    if not j then
-      hs.alert.show(err)
-      return
-    end
-    g.jump = j
-  end
-  afterGroupsChanged()
-  hs.alert.show(g.name .. ": ジャンプ先を更新", 0.6)
-end
-
 local function deleteGroup(gi)
   local g = GROUPS[gi]
   if not confirmDialog("グループを削除",
@@ -606,11 +714,9 @@ end
 -- ---------------------------------------------------------
 -- プリセット（スナップショット）機能
 -- ---------------------------------------------------------
-local PRESETS_KEY = "SpaceGroups.presets"
-local presets = hs.settings.get(PRESETS_KEY) or {}
-
+-- presets は冒頭の永続化ブロックで読み込み済み。保存は JSON 全体をまとめて書く。
 local function savePresetsToDisk()
-  hs.settings.set(PRESETS_KEY, presets)
+  saveData()
 end
 
 local function currentVisibleSpaceNumbers()
@@ -800,7 +906,6 @@ local function buildMenu()
         { title = "名前を変更…", fn = function() renameGroup(i) end },
         { title = "アイコンを変更…", fn = function() editGroupIcon(i) end },
         { title = "所属デスクトップを編集…", fn = function() editGroupSpaces(i) end },
-        { title = "ジャンプ先を編集…", fn = function() editGroupJump(i) end },
         { title = "-" },
         { title = "このグループを削除…", fn = function() deleteGroup(i) end },
       },
@@ -832,6 +937,9 @@ local function buildMenu()
   table.insert(items, {
     title = "ユーティリティ",
     menu = {
+      { title = "JSON設定を開く (space_groups.json)", fn = openDataFile },
+      { title = "JSONから再読み込み", fn = reloadDataFile },
+      { title = "-" },
       { title = "設定を開く (init.lua)", fn = openConfig },
       { title = "設定をリロード", fn = function() hs.reload() end },
       { title = "-" },
@@ -846,14 +954,24 @@ end
 menubar:setMenu(buildMenu)
 
 -- ---------------------------------------------------------
--- Space切り替え検知 → メニューバー更新
+-- Space切り替え・フォーカス移動検知 → メニューバー更新
 -- ---------------------------------------------------------
+-- spaces.watcher はスペース切替しか拾わない。ディスプレイ間でフォーカスを移した
+-- （＝操作対象デスクトップが変わった）場合も即時にメニューバー名を追従させる。
 local spaceWatcher = spaces.watcher.new(function()
   hs.timer.doAfter(0.3, updateMenubarTitle)
 end)
 spaceWatcher:start()
 
--- watcherの動作を実機確認できたらこの行は削除してよい
+-- ウィンドウのフォーカス変化（別ディスプレイのウィンドウをクリック等）を検知し、
+-- 操作中デスクトップ名をメニューバーへ即時反映する。
+local focusWatcher = hs.window.filter.new(false)
+focusWatcher:setDefaultFilter({})  -- 全ウィンドウを対象にする
+focusWatcher:subscribe(hs.window.filter.windowFocused, function()
+  hs.timer.doAfter(0.1, updateMenubarTitle)
+end)
+
+-- watcher の取りこぼしに備えた保険ポーリング
 local pollTimer = hs.timer.doEvery(2, updateMenubarTitle)
 
 -- ---------------------------------------------------------
@@ -874,8 +992,8 @@ function rebindGroupHotkeys()
 end
 rebindGroupHotkeys()
 
-hs.hotkey.bind(CYCLE_MODS, CYCLE_NEXT_KEY, function() cycleInGroup(1) end)
-hs.hotkey.bind(CYCLE_MODS, CYCLE_PREV_KEY, function() cycleInGroup(-1) end)
+hs.hotkey.bind(CYCLE_MODS, CYCLE_NEXT_KEY, function() cycleGroup(1) end)
+hs.hotkey.bind(CYCLE_MODS, CYCLE_PREV_KEY, function() cycleGroup(-1) end)
 hs.hotkey.bind({ "ctrl", "alt" }, "r", function() hs.reload() end)
 hs.hotkey.bind({ "ctrl", "alt" }, "c", function() hs.openConsole() end)
 
